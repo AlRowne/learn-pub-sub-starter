@@ -22,16 +22,36 @@ func run() error {
 		return err
 	}
 	queueName := fmt.Sprintf("%s.%s", routing.PauseKey, username)
-	ch, _, err := pubsub.DeclareAndBind(conn, routing.ExchangePerilDirect, queueName, routing.PauseKey, pubsub.Transient)
-	if err != nil {
-		return err
-	}
-	defer ch.Close()
 
 	fmt.Println("Starting Peril client...")
 
 	gamelogic.PrintClientHelp()
 	gs := gamelogic.NewGameState(username)
+
+	if err := pubsub.SubscribeJSON(
+		conn,
+		routing.ExchangePerilDirect,
+		queueName,
+		routing.PauseKey,
+		pubsub.Transient,
+		handlerPause(gs)); err != nil {
+		return err
+	}
+	mvRoutingKey := fmt.Sprintf("army_moves.%s", username)
+	if err := pubsub.SubscribeJSON(conn,
+		routing.ExchangePerilTopic,
+		mvRoutingKey,
+		fmt.Sprintf("%s.*", routing.ArmyMovesPrefix),
+		pubsub.Transient,
+		handlerMove(gs)); err != nil {
+		return err
+	}
+
+	ch, err := conn.Channel()
+	if err != nil {
+		return err
+	}
+	defer ch.Close()
 
 	for {
 		input := gamelogic.GetInput()
@@ -45,12 +65,20 @@ func run() error {
 				continue
 			}
 		case "move":
-			_, err := gs.CommandMove(input)
+			move, err := gs.CommandMove(input)
 			if err != nil {
 				fmt.Println(err)
 				continue
 			}
-			fmt.Println("move successful")
+			if err := pubsub.PublishJSON(
+				ch,
+				routing.ExchangePerilTopic,
+				mvRoutingKey,
+				move); err != nil {
+				fmt.Println(err)
+				continue
+			}
+			fmt.Println("move published successfully")
 		case "status":
 			gs.CommandStatus()
 		case "help":
@@ -64,6 +92,19 @@ func run() error {
 			fmt.Println("command not recognized...")
 			continue
 		}
+	}
+}
+func handlerPause(gs *gamelogic.GameState) func(routing.PlayingState) {
+	return func(ps routing.PlayingState) {
+		defer fmt.Print("> ")
+		gs.HandlePause(ps)
+	}
+}
+
+func handlerMove(gs *gamelogic.GameState) func(gamelogic.ArmyMove) {
+	return func(move gamelogic.ArmyMove) {
+		defer fmt.Print("> ")
+		gs.HandleMove(move)
 	}
 }
 
